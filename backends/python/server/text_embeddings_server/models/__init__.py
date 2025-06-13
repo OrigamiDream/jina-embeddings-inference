@@ -8,6 +8,7 @@ from transformers import AutoConfig
 from transformers.models.bert import BertConfig
 
 from text_embeddings_server.models.model import Model
+from text_embeddings_server.models.jina import JinaModel
 from text_embeddings_server.models.masked_model import MaskedLanguageModel
 from text_embeddings_server.models.default_model import DefaultModel
 from text_embeddings_server.models.classification_model import ClassificationModel
@@ -15,7 +16,7 @@ from text_embeddings_server.models.jinaBert_model import FlashJinaBert
 from text_embeddings_server.models.flash_mistral import FlashMistral
 from text_embeddings_server.utils.device import get_device, use_ipex
 
-__all__ = ["Model"]
+__all__ = ["Model", "JinaModel"]
 
 TRUST_REMOTE_CODE = os.getenv("TRUST_REMOTE_CODE", "false").lower() in ["true", "1"]
 # Disable gradients
@@ -50,11 +51,14 @@ def get_model(model_path: Path, dtype: Optional[str], pool: str):
         hasattr(config, "auto_map")
         and isinstance(config.auto_map, dict)
         and "AutoModel" in config.auto_map
-        and config.auto_map["AutoModel"]
-        == "jinaai/jina-bert-v2-qk-post-norm--modeling_bert.JinaBertModel"
     ):
-        # Add specific offline modeling for model "jinaai/jina-embeddings-v2-base-code" which uses "autoMap" to reference code in other repository
-        return FlashJinaBert(model_path, config, device, datatype, pool)
+        if config.auto_map["AutoModel"] == "jinaai/jina-bert-v2-qk-post-norm--modeling_bert.JinaBertModel":
+            # Add specific offline modeling for model "jinaai/jina-embeddings-v2-base-code" which uses "autoMap" to reference code in other repository
+            return FlashJinaBert(model_path, config, device, datatype, pool)
+        elif config.auto_map["AutoModel"] == "jinaai/xlm-roberta-flash-implementation--modeling_lora.XLMRobertaLoRA":
+            # Add specific offline modeling for model "jinaai/jina-embeddings-v3" which uses "autoMap" to reference code in other repository
+            return JinaModel(model_path, device, datatype)
+
     elif config.model_type == "bert":
         config: BertConfig
         if (

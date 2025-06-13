@@ -209,6 +209,44 @@ impl From<TruncationDirection> for tokenizers::TruncationDirection {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Deserialize)]
+pub(crate) enum Task {
+    #[serde(rename = "retrieval.query")]
+    RetrievalQuery,
+    #[serde(rename = "retrieval.passage")]
+    RetrievalPassage,
+    #[serde(rename = "separation")]
+    Separation,
+    #[serde(rename = "classification")]
+    Classification,
+    #[serde(rename = "text-matching")]
+    TextMatching,
+}
+
+impl From<Task> for text_embeddings_backend::Task {
+    fn from(value: Task) -> Self {
+        match value {
+            Task::RetrievalQuery => Self::RetrievalQuery,
+            Task::RetrievalPassage => Self::RetrievalPassage,
+            Task::Separation => Self::Separation,
+            Task::Classification => Self::Classification,
+            Task::TextMatching => Self::TextMatching,
+        }
+    }
+}
+
+impl Into<Task> for text_embeddings_backend::Task {
+    fn into(self) -> Task {
+        match self {
+            text_embeddings_backend::Task::RetrievalQuery => Task::RetrievalQuery,
+            text_embeddings_backend::Task::RetrievalPassage => Task::RetrievalPassage,
+            text_embeddings_backend::Task::Separation => Task::Separation,
+            text_embeddings_backend::Task::Classification => Task::Classification,
+            text_embeddings_backend::Task::TextMatching => Task::TextMatching,
+        }
+    }
+}
+
 #[derive(Deserialize, ToSchema)]
 pub(crate) struct PredictRequest {
     pub inputs: PredictInput,
@@ -323,6 +361,15 @@ pub(crate) struct OpenAICompatRequest {
     #[schema(default = "float", example = "float")]
     #[serde(default)]
     pub encoding_format: EncodingFormat,
+    #[serde(default = "default_normalize")]
+    #[schema(default = "true", example = "true")]
+    pub normalize: bool,
+    #[serde(default)]
+    #[schema(default = "null", example = "null")]
+    pub task: Option<Task>,
+    #[serde(default)]
+    #[schema(default = "null", example = "null")]
+    pub dimensions: Option<u32>,
 }
 
 #[derive(Serialize, ToSchema)]
@@ -389,6 +436,12 @@ pub(crate) struct SimilarityParameters {
     /// any text to encode.
     #[schema(default = "null", example = "null", nullable = true)]
     pub prompt_name: Option<String>,
+    #[serde(default = "default_normalize")]
+    #[schema(default = "true", example = "true")]
+    pub normalize: bool,
+    #[serde(default)]
+    #[schema(default = "null", example = "null")]
+    pub dimensions: Option<u32>,
 }
 
 #[derive(Deserialize, ToSchema)]
@@ -426,6 +479,12 @@ pub(crate) struct EmbedRequest {
     #[serde(default = "default_normalize")]
     #[schema(default = "true", example = "true")]
     pub normalize: bool,
+    #[serde(default)]
+    #[schema(default = "null", example = "null")]
+    pub task: Option<Task>,
+    #[serde(default)]
+    #[schema(default = "null", example = "null")]
+    pub dimensions: Option<u32>,
 }
 
 fn default_normalize() -> bool {
@@ -487,6 +546,12 @@ pub(crate) struct EmbedAllRequest {
     /// any text to encode.
     #[schema(default = "null", example = "null", nullable = true)]
     pub prompt_name: Option<String>,
+    #[serde(default)]
+    #[schema(default = "null", example = "null")]
+    pub task: Option<Task>,
+    #[serde(default)]
+    #[schema(default = "null", example = "null")]
+    pub dimensions: Option<u32>,
 }
 
 #[derive(Serialize, ToSchema)]

@@ -30,7 +30,7 @@ use metrics_exporter_prometheus::{PrometheusBuilder, PrometheusHandle};
 use simsimd::SpatialSimilarity;
 use std::net::SocketAddr;
 use std::time::{Duration, Instant};
-use text_embeddings_backend::BackendError;
+use text_embeddings_backend::{BackendError, Task};
 use text_embeddings_core::infer::{
     AllEmbeddingsInferResponse, Infer, InferMetadata, PooledEmbeddingsInferResponse,
 };
@@ -514,11 +514,13 @@ async fn similarity(
         counter.increment(1);
         Err(err)?;
     }
+    let batch_size = req.inputs.sentences.len();
+
     // +1 because of the source sentence
-    let batch_size = req.inputs.sentences.len() + 1;
-    if batch_size > info.max_client_batch_size {
+    let total_batch_size = batch_size + 1;
+    if total_batch_size > info.max_client_batch_size {
         let message = format!(
-            "batch size {batch_size} > maximum allowed batch size {}",
+            "batch size {total_batch_size} > maximum allowed batch size {}",
             info.max_client_batch_size
         );
         tracing::error!("{message}");
@@ -532,30 +534,62 @@ async fn similarity(
     }
 
     // Convert request to embed request
-    let mut inputs = Vec::with_capacity(req.inputs.sentences.len() + 1);
-    inputs.push(InputType::String(req.inputs.source_sentence));
+    let mut inputs = Vec::with_capacity(req.inputs.sentences.len());
     for s in req.inputs.sentences {
         inputs.push(InputType::String(s));
     }
+    let src_inputs = InputType::String(req.inputs.source_sentence);
+
     let parameters = req.parameters.unwrap_or_default();
+    let src_embed_req = EmbedRequest {
+        inputs: Input::Single(src_inputs),
+        truncate: parameters.truncate,
+        truncation_direction: parameters.truncation_direction,
+        prompt_name: parameters.prompt_name.clone(),
+        normalize: parameters.normalize,
+        task: Some(Task::RetrievalQuery.into()),
+        dimensions: parameters.dimensions,
+    };
     let embed_req = EmbedRequest {
         inputs: Input::Batch(inputs),
         truncate: parameters.truncate,
         truncation_direction: parameters.truncation_direction,
         prompt_name: parameters.prompt_name,
-        normalize: false,
+        normalize: parameters.normalize,
+        task: Some(Task::RetrievalPassage.into()),
+        dimensions: parameters.dimensions,
     };
 
+    let mut futures = Vec::with_capacity(2);
+    futures.push(embed(infer.clone(), info.clone(), context.clone(), Json(src_embed_req)));
+    futures.push(embed(infer, info, context, Json(embed_req)));
+
+    let mut results = join_all(futures)
+        .await
+        .into_iter()
+        .collect::<Result<Vec<(HeaderMap, Json<EmbedResponse>)>, (StatusCode, Json<ErrorResponse>)>>()?;
+
     // Get embeddings
-    let (header_map, embed_response) = embed(infer, info, context, Json(embed_req)).await?;
+    let (src_header_map, src_embed_response) = results.remove(0);
+    let (header_map, embed_response) = results.remove(0);
+
+    let src_embeddings = src_embed_response.0 .0;
     let embeddings = embed_response.0 .0;
 
     // Compute cosine
-    let distances = (1..batch_size)
-        .map(|i| 1.0 - f32::cosine(&embeddings[0], &embeddings[i]).unwrap() as f32)
+    let distances = (0..batch_size)
+        .map(|i| 1.0 - f32::cosine(&src_embeddings[0], &embeddings[i]).unwrap() as f32)
         .collect();
 
-    Ok((header_map, Json(SimilarityResponse(distances))))
+    let mut new_header_map = HeaderMap::new();
+    for (key, value) in src_header_map.iter() {
+        new_header_map.insert(key, value.clone());
+    }
+    for (key, value) in header_map.iter() {
+        new_header_map.insert(key, value.clone());
+    }
+
+    Ok((new_header_map, Json(SimilarityResponse(distances))))
 }
 
 /// Get Embeddings. Returns a 424 status code if the model is not an embedding model.
@@ -611,6 +645,8 @@ async fn embed(
                     req.truncation_direction.into(),
                     req.prompt_name,
                     req.normalize,
+                    req.task.map(|x| x.into()),
+                    req.dimensions,
                     permit,
                 )
                 .await
@@ -679,6 +715,8 @@ async fn embed(
                             req.truncation_direction.into(),
                             prompt_name,
                             req.normalize,
+                            req.task.map(|x| x.into()),
+                            req.dimensions,
                             permit,
                         )
                         .await
@@ -793,6 +831,8 @@ async fn embed_sparse(
                     truncate,
                     req.truncation_direction.into(),
                     req.prompt_name,
+                    None,
+                    None,
                     permit,
                 )
                 .await
@@ -860,6 +900,8 @@ async fn embed_sparse(
                             truncate,
                             req.truncation_direction.into(),
                             prompt_name,
+                            None,
+                            None,
                             permit,
                         )
                         .await?;
@@ -967,6 +1009,8 @@ async fn embed_all(
                     truncate,
                     req.truncation_direction.into(),
                     req.prompt_name,
+                    req.task.map(|x| x.into()),
+                    req.dimensions,
                     permit,
                 )
                 .await
@@ -1034,6 +1078,8 @@ async fn embed_all(
                             truncate,
                             req.truncation_direction.into(),
                             prompt_name,
+                            req.task.map(|x| x.into()),
+                            req.dimensions,
                             permit,
                         )
                         .await
@@ -1155,7 +1201,9 @@ async fn openai_embed(
                     truncate,
                     tokenizers::TruncationDirection::Right,
                     None,
-                    true,
+                    req.normalize,
+                    req.task.map(|x| x.into()),
+                    req.dimensions,
                     permit,
                 )
                 .await
@@ -1227,7 +1275,9 @@ async fn openai_embed(
                             truncate,
                             tokenizers::TruncationDirection::Right,
                             None,
-                            true,
+                            req.normalize,
+                            req.task.map(|x| x.into()),
+                            req.dimensions,
                             permit,
                         )
                         .await

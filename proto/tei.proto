@@ -74,12 +74,22 @@ enum TruncationDirection {
     TRUNCATION_DIRECTION_LEFT = 1;
 }
 
+enum Task {
+    RETRIEVAL_QUERY = 0;
+    RETRIEVAL_PASSAGE = 1;
+    SEPARATION = 2;
+    CLASSIFICATION = 3;
+    TEXT_MATCHING = 4;
+}
+
 message EmbedRequest {
     string inputs = 1;
     bool truncate = 2;
     bool normalize = 3;
     TruncationDirection truncation_direction = 4;
     optional string prompt_name = 5;
+    optional Task task = 6;
+    optional uint32 dimensions = 7;
 }
 
 message EmbedResponse {
@@ -109,6 +119,8 @@ message EmbedAllRequest {
     bool truncate = 2;
     TruncationDirection truncation_direction = 3;
     optional string prompt_name = 4;
+    optional Task task = 5;
+    optional uint32 dimensions = 6;
 }
 
 message TokenEmbedding {

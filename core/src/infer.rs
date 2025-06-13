@@ -3,7 +3,7 @@ use crate::tokenization::{EncodingInput, RawEncoding, Tokenization};
 use crate::TextEmbeddingsError;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
-use text_embeddings_backend::{Backend, BackendError, Embedding, ModelType};
+use text_embeddings_backend::{Backend, BackendError, Embedding, ModelType, Task};
 use tokenizers::TruncationDirection;
 use tokio::sync::{mpsc, oneshot, watch, Notify, OwnedSemaphorePermit, Semaphore};
 use tracing::instrument;
@@ -121,6 +121,8 @@ impl Infer {
         truncate: bool,
         truncation_direction: TruncationDirection,
         prompt_name: Option<String>,
+        task: Option<Task>,
+        dimensions: Option<u32>,
         permit: OwnedSemaphorePermit,
     ) -> Result<AllEmbeddingsInferResponse, TextEmbeddingsError> {
         let start_time = Instant::now();
@@ -142,6 +144,8 @@ impl Infer {
                 truncation_direction,
                 prompt_name,
                 false,
+                task,
+                dimensions,
                 &start_time,
                 permit,
             )
@@ -176,6 +180,8 @@ impl Infer {
         truncate: bool,
         truncation_direction: TruncationDirection,
         prompt_name: Option<String>,
+        task: Option<Task>,
+        dimensions: Option<u32>,
         permit: OwnedSemaphorePermit,
     ) -> Result<PooledEmbeddingsInferResponse, TextEmbeddingsError> {
         let start_time = Instant::now();
@@ -197,6 +203,8 @@ impl Infer {
                 truncation_direction,
                 prompt_name,
                 true,
+                task,
+                dimensions,
                 &start_time,
                 permit,
             )
@@ -232,6 +240,8 @@ impl Infer {
         truncation_direction: TruncationDirection,
         prompt_name: Option<String>,
         normalize: bool,
+        task: Option<Task>,
+        dimensions: Option<u32>,
         permit: OwnedSemaphorePermit,
     ) -> Result<PooledEmbeddingsInferResponse, TextEmbeddingsError> {
         let start_time = Instant::now();
@@ -253,6 +263,8 @@ impl Infer {
                 truncation_direction,
                 prompt_name,
                 true,
+                task,
+                dimensions,
                 &start_time,
                 permit,
             )
@@ -277,6 +289,10 @@ impl Infer {
             for v in response.results.iter_mut() {
                 *v *= scale;
             }
+        }
+        
+        if let Some(dimensions) = dimensions {
+            response.results.truncate(dimensions as usize);
         }
 
         // Timings
@@ -305,6 +321,8 @@ impl Infer {
         truncation_direction: TruncationDirection,
         prompt_name: Option<String>,
         pooling: bool,
+        task: Option<Task>,
+        dimensions: Option<u32>,
         start_time: &Instant,
         _permit: OwnedSemaphorePermit,
     ) -> Result<InferResult, TextEmbeddingsError> {
@@ -344,6 +362,8 @@ impl Infer {
                 queue_time: Instant::now(),
                 prompt_tokens: encoding.input_ids.len(),
                 pooling,
+                task,
+                dimensions,
             },
             encoding,
         });
@@ -410,6 +430,8 @@ impl Infer {
                 queue_time: Instant::now(),
                 prompt_tokens: encoding.input_ids.len(),
                 pooling: true,
+                task: None,
+                dimensions: None,
             },
             encoding,
         });

@@ -3,7 +3,7 @@ use crate::tokenization::ValidEncoding;
 use std::cmp::max;
 use std::collections::VecDeque;
 use std::time::{Duration, Instant};
-use text_embeddings_backend::{BackendError, Batch};
+use text_embeddings_backend::{BackendError, Batch, Task};
 use tokio::sync::{mpsc, oneshot};
 use tracing::{instrument, Span};
 
@@ -29,6 +29,10 @@ pub struct Metadata {
     pub(crate) prompt_tokens: usize,
     /// Pooled embedding
     pub(crate) pooling: bool,
+    /// Embedding tasks
+    pub(crate) task: Option<Task>,
+    /// Jina matryoshka embedding dimensions
+    pub(crate) dimensions: Option<u32>,
 }
 
 /// Request Queue
@@ -128,6 +132,9 @@ fn queue_blocking_task(
                 let mut metadata = Vec::with_capacity(capacity);
                 let mut cu_seq_lengths = Vec::with_capacity(capacity);
                 cu_seq_lengths.push(0);
+                
+                let mut tasks = Vec::with_capacity(capacity);
+                let mut dimensions = Vec::with_capacity(capacity);
 
                 let mut current_tokens = 0;
                 let mut max_length = 0;
@@ -161,6 +168,9 @@ fn queue_blocking_task(
                         true => pooled_indices.push(entry_index),
                         false => raw_indices.push(entry_index),
                     }
+                    
+                    tasks.push(entry.metadata.task.clone());
+                    dimensions.push(entry.metadata.dimensions.clone());
 
                     max_length = max(max_length, entry_tokens as u32);
 
@@ -193,6 +203,8 @@ fn queue_blocking_task(
                             max_length,
                             pooled_indices,
                             raw_indices,
+                            tasks,
+                            dimensions,
                         },
                     ))
                 };

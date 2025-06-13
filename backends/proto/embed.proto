@@ -14,6 +14,15 @@ service EmbeddingService {
 message HealthRequest {}
 message HealthResponse {}
 
+enum Task {
+    UNDEFINED = 0;
+    RETRIEVAL_QUERY = 1;
+    RETRIEVAL_PASSAGE = 2;
+    SEPARATION = 3;
+    CLASSIFICATION = 4;
+    TEXT_MATCHING = 5;
+}
+
 message EmbedRequest {
     repeated uint32 input_ids = 1;
     repeated uint32 token_type_ids = 2;
@@ -21,6 +30,9 @@ message EmbedRequest {
     repeated uint32 cu_seq_lengths = 4;
     /// Length of the longest request
     uint32 max_length = 5;
+    /// Parameters for Jina-embeddings-v3
+    repeated Task task = 6;
+    repeated uint32 dimensions = 7;
 }
 
 message Embedding {

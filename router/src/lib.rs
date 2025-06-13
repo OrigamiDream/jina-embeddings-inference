@@ -142,7 +142,8 @@ pub async fn run(
     tokenizer.with_padding(None);
     // Qwen2 updates the post processor manually instead of into the tokenizer.json...
     // https://huggingface.co/Alibaba-NLP/gte-Qwen2-1.5B-instruct/blob/main/tokenization_qwen.py#L246
-    if config.model_type == "qwen2" {
+    let config_model_type = config.model_type.unwrap_or("xlm-roberta".to_string());
+    if config_model_type == "qwen2" {
         let template = TemplateProcessing::builder()
             .try_single("$A:0 <|endoftext|>:0")
             .unwrap()
@@ -164,9 +165,9 @@ pub async fn run(
     }
 
     // Position IDs offset. Used for Roberta and camembert.
-    let position_offset = if &config.model_type == "xlm-roberta"
-        || &config.model_type == "camembert"
-        || &config.model_type == "roberta"
+    let position_offset = if config_model_type == "xlm-roberta" 
+        || config_model_type == "camembert" 
+        || config_model_type == "roberta" 
     {
         config.pad_token_id + 1
     } else {
@@ -396,11 +397,16 @@ fn get_backend_model_type(
                     Pool::try_from(config)?
                 }
                 Err(err) => {
-                    if !config.model_type.to_lowercase().contains("bert") {
+                    let model_type = config.model_type.clone().unwrap_or("xlm-roberta".to_string());
+                    if !model_type.to_lowercase().contains("bert") {
                         return Err(err).context("The `--pooling` arg is not set and we could not find a pooling configuration (`1_Pooling/config.json`) for this model.");
+                    } else if model_type == "xlm-roberta" {
+                        tracing::warn!("The model-type is forced to use `xlm-roberta`. Defaulting to `MEAN` pooling.");
+                        text_embeddings_backend::Pool::Mean
+                    } else {
+                        tracing::warn!("The `--pooling` arg is not set and we could not find a pooling configuration (`1_Pooling/config.json`) for this model but the model is a BERT variant. Defaulting to `CLS` pooling.");
+                        text_embeddings_backend::Pool::Cls
                     }
-                    tracing::warn!("The `--pooling` arg is not set and we could not find a pooling configuration (`1_Pooling/config.json`) for this model but the model is a BERT variant. Defaulting to `CLS` pooling.");
-                    text_embeddings_backend::Pool::Cls
                 }
             }
         }
@@ -411,7 +417,7 @@ fn get_backend_model_type(
 #[derive(Debug, Deserialize)]
 pub struct ModelConfig {
     pub architectures: Vec<String>,
-    pub model_type: String,
+    pub model_type: Option<String>,
     #[serde(alias = "n_positions")]
     pub max_position_embeddings: usize,
     #[serde(default)]

@@ -4,15 +4,48 @@ mod management;
 use backend_grpc_client::Client;
 use nohash_hasher::BuildNoHashHasher;
 use std::collections::HashMap;
-use text_embeddings_backend_core::{
-    Backend, BackendError, Batch, Embedding, Embeddings, ModelType, Pool, Predictions,
-};
+use text_embeddings_backend_core::{Backend, BackendError, Batch, Embedding, Embeddings, ModelType, Pool, Predictions, Task};
 use tokio::runtime::Runtime;
 
 pub struct PythonBackend {
     _backend_process: management::BackendProcess,
     tokio_runtime: Runtime,
     backend_client: Client,
+}
+
+struct JinaBatchProtobuf {
+    tasks: Vec<i32>,
+    dimensions: Vec<u32>,
+}
+
+fn compute_batch_protobuf(batch: &Batch) -> JinaBatchProtobuf {
+    let batch_tasks = batch.tasks
+        .iter()
+        .map(|x| {
+            match x {
+                None => 0, // Unspecified | Undefined
+                Some(task) => {
+                    // Set offset +1 since `Undefined` has reserved value 0. 
+                    match task {
+                        Task::RetrievalQuery => 1,
+                        Task::RetrievalPassage => 2,
+                        Task::Separation => 3,
+                        Task::Classification => 4,
+                        Task::TextMatching => 5,
+                    }
+                }
+            }
+        })
+        .collect();
+    let batch_dimensions: Vec<u32> = batch.dimensions
+        .iter()
+        .map(|x| x.unwrap_or(0))
+        .collect();
+
+    JinaBatchProtobuf {
+        tasks: batch_tasks,
+        dimensions: batch_dimensions,
+    }
 }
 
 impl PythonBackend {
@@ -79,6 +112,7 @@ impl Backend for PythonBackend {
             ));
         }
         let batch_size = batch.len();
+        let batch_protobuf = compute_batch_protobuf(&batch);
 
         let results = self
             .tokio_runtime
@@ -87,6 +121,8 @@ impl Backend for PythonBackend {
                 batch.token_type_ids,
                 batch.position_ids,
                 batch.cumulative_seq_lengths,
+                batch_protobuf.tasks,
+                batch_protobuf.dimensions,
                 batch.max_length,
             ))
             .map_err(|err| BackendError::Inference(err.to_string()))?;
@@ -108,6 +144,8 @@ impl Backend for PythonBackend {
             ));
         }
         let batch_size = batch.len();
+        let batch_protobuf = compute_batch_protobuf(&batch);
+
         let results = self
             .tokio_runtime
             .block_on(self.backend_client.clone().predict(
@@ -115,6 +153,8 @@ impl Backend for PythonBackend {
                 batch.token_type_ids,
                 batch.position_ids,
                 batch.cumulative_seq_lengths,
+                batch_protobuf.tasks,
+                batch_protobuf.dimensions,
                 batch.max_length,
             ))
             .map_err(|err| BackendError::Inference(err.to_string()))?;

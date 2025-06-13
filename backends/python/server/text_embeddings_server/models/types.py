@@ -1,4 +1,7 @@
 import os
+from enum import Enum
+from typing import Optional, List
+
 import math
 import torch
 
@@ -15,6 +18,29 @@ PAD_SEQUENCE_TO_MULTIPLE_OF = int(os.environ.get("PAD_SEQUENCE_TO_MULTIPLE_OF", 
 
 def round_up(number, k):
     return (number + k - 1) // k * k
+
+
+class Task(Enum):
+    RETRIEVAL_QUERY = "retrieval.query"
+    RETRIEVAL_PASSAGE = "retrieval.passage"
+    SEPARATION = "separation"
+    CLASSIFICATION = "classification"
+    TEXT_MATCHING = "text-matching"
+
+
+def proto_to_embed_tasks(pb_task) -> Optional[Task]:
+    task = None
+    if pb_task == embed_pb2.Task.RETRIEVAL_QUERY:
+        task = Task.RETRIEVAL_QUERY
+    elif pb_task == embed_pb2.Task.RETRIEVAL_PASSAGE:
+        task = Task.RETRIEVAL_PASSAGE
+    elif pb_task == embed_pb2.Task.SEPARATION:
+        task = Task.SEPARATION
+    elif pb_task == embed_pb2.Task.CLASSIFICATION:
+        task = Task.CLASSIFICATION
+    elif pb_task == embed_pb2.Task.TEXT_MATCHING:
+        task = Task.TEXT_MATCHING
+    return task
 
 
 class Batch(ABC):
@@ -34,6 +60,8 @@ class PaddedBatch(Batch):
     token_type_ids: torch.Tensor
     position_ids: torch.Tensor
     attention_mask: torch.Tensor
+    task: List[Optional[Task]]
+    dimensions: List[Optional[int]]
 
     @classmethod
     @tracer.start_as_current_span("from_pb")
@@ -72,12 +100,20 @@ class PaddedBatch(Batch):
 
         # Move padded tensors all at once
         all_tensors = all_tensors.to(device)
+        task = [
+            proto_to_embed_tasks(t) for t in pb.task
+        ]
+        dimensions = [
+            None if dimension == 0 else dimension for dimension in pb.dimensions
+        ]
 
         return PaddedBatch(
             input_ids=all_tensors[0],
             token_type_ids=all_tensors[1],
             position_ids=all_tensors[2],
             attention_mask=all_tensors[3],
+            task=task,
+            dimensions=dimensions,
         )
 
     def __len__(self):

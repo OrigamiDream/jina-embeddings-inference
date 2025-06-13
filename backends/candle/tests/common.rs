@@ -242,6 +242,8 @@ pub fn batch(encodings: Vec<Encoding>, pooled_indices: Vec<u32>, raw_indices: Ve
     let mut input_ids = Vec::new();
     let mut token_type_ids = Vec::new();
     let mut position_ids = Vec::new();
+    let mut tasks = Vec::new();
+    let mut dimensions = Vec::new();
     let mut cumulative_seq_lengths = Vec::with_capacity(encodings.len() + 1);
     cumulative_seq_lengths.push(0);
 
@@ -256,6 +258,8 @@ pub fn batch(encodings: Vec<Encoding>, pooled_indices: Vec<u32>, raw_indices: Ve
         cumulative_length += encoding_length;
         cumulative_seq_lengths.push(cumulative_length);
         max_length = max(max_length, encoding_length);
+        tasks.push(None);
+        dimensions.push(None);
     }
 
     Batch {
@@ -266,5 +270,7 @@ pub fn batch(encodings: Vec<Encoding>, pooled_indices: Vec<u32>, raw_indices: Ve
         max_length,
         pooled_indices,
         raw_indices,
+        tasks,
+        dimensions,
     }
 }

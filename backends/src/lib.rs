@@ -15,7 +15,7 @@ use tracing::{instrument, Span};
 
 pub use crate::dtype::DType;
 pub use text_embeddings_backend_core::{
-    BackendError, Batch, Embedding, Embeddings, ModelType, Pool,
+    BackendError, Batch, Embedding, Embeddings, ModelType, Pool, Task,
 };
 
 #[cfg(feature = "candle")]
@@ -169,6 +169,8 @@ impl Backend {
         let mut batched_position_ids = Vec::new();
         let mut cumulative_seq_lengths = Vec::with_capacity(batch_size as usize + 1);
         let mut pooled_indices = Vec::with_capacity(batch_size as usize);
+        let mut tasks = Vec::with_capacity(batch_size as usize);
+        let mut dimensions = Vec::with_capacity(batch_size as usize);
         cumulative_seq_lengths.push(0);
         let input_ids: Vec<u32> = (0..length)
             .map(|_| rand::rng().random_range(0..max_token))
@@ -183,6 +185,8 @@ impl Backend {
             current_length += input_ids.len();
             cumulative_seq_lengths.push(current_length as u32);
             pooled_indices.push(batch_id);
+            tasks.push(None);
+            dimensions.push(None);
         }
         Batch {
             input_ids: batched_input_ids,
@@ -192,6 +196,8 @@ impl Backend {
             max_length: length,
             pooled_indices,
             raw_indices: vec![],
+            tasks,
+            dimensions,
         }
     }
 
@@ -214,6 +220,8 @@ impl Backend {
 
         let mut cumulative_seq_lengths = vec![0];
         let mut pooled_indices = Vec::new();
+        let mut tasks = Vec::new();
+        let mut dimensions = Vec::new();
 
         let mut i = 0_u32;
         let mut remaining = max_batch_tokens;
@@ -231,6 +239,9 @@ impl Backend {
 
             cumulative_seq_lengths.push(cumulative_length as u32);
             pooled_indices.push(i);
+            
+            tasks.push(None);
+            dimensions.push(None);
 
             i += 1;
             remaining = remaining.saturating_sub(max_input_length);
@@ -249,6 +260,8 @@ impl Backend {
             max_length,
             pooled_indices,
             raw_indices: vec![],
+            tasks,
+            dimensions,
         };
 
         match &self.model_type {
@@ -283,6 +296,8 @@ impl Backend {
                 max_length: 1,
                 pooled_indices: vec![0],
                 raw_indices: vec![],
+                tasks: vec![None],
+                dimensions: vec![None],
             };
             match &self.model_type {
                 ModelType::Classifier => self.predict(batch).await.map(|_| ()),

@@ -14,6 +14,8 @@ pub struct Batch {
     pub max_length: u32,
     pub pooled_indices: Vec<u32>,
     pub raw_indices: Vec<u32>,
+    pub tasks: Vec<Option<Task>>,
+    pub dimensions: Vec<Option<u32>>,
 }
 
 impl Batch {
@@ -78,6 +80,15 @@ impl fmt::Display for Pool {
             Pool::LastToken => write!(f, "last_token"),
         }
     }
+}
+
+#[derive(Debug, PartialEq, Clone)]
+pub enum Task {
+    RetrievalQuery,
+    RetrievalPassage,
+    Separation,
+    Classification,
+    TextMatching,
 }
 
 #[derive(Debug, Error, Clone)]
