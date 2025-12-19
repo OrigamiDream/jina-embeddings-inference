@@ -1,0 +1,227 @@
+FROM nvidia/cuda:12.4.1-devel-ubuntu22.04 AS base-builder
+
+ENV SCCACHE=0.5.4
+ENV RUSTC_WRAPPER=/usr/local/bin/sccache
+ENV PATH="/root/.cargo/bin:${PATH}"
+
+RUN apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+    curl \
+    libssl-dev \
+    pkg-config \
+    && rm -rf /var/lib/apt/lists/*
+
+# Donwload and configure sccache
+RUN curl -fsSL https://github.com/mozilla/sccache/releases/download/v$SCCACHE/sccache-v$SCCACHE-x86_64-unknown-linux-musl.tar.gz | tar -xzv --strip-components=1 -C /usr/local/bin sccache-v$SCCACHE-x86_64-unknown-linux-musl/sccache && \
+    chmod +x /usr/local/bin/sccache
+
+RUN curl https://sh.rustup.rs -sSf | bash -s -- -y
+RUN cargo install cargo-chef --locked
+
+FROM base-builder AS planner
+
+WORKDIR /usr/src
+
+COPY backends backends
+COPY core core
+COPY router router
+COPY Cargo.toml ./
+COPY Cargo.lock ./
+
+RUN cargo chef prepare  --recipe-path recipe.json
+
+FROM base-builder AS builder
+
+ARG CUDA_COMPUTE_CAP=80
+ARG GIT_SHA
+ARG DOCKER_LABEL
+
+# Limit parallelism
+ARG RAYON_NUM_THREADS
+ARG CARGO_BUILD_JOBS
+ARG CARGO_BUILD_INCREMENTAL
+
+# sccache specific variables
+ARG ACTIONS_CACHE_URL
+ARG ACTIONS_RUNTIME_TOKEN
+ARG SCCACHE_GHA_ENABLED
+
+WORKDIR /usr/src
+
+RUN if [ ${CUDA_COMPUTE_CAP} -ge 75 -a ${CUDA_COMPUTE_CAP} -lt 80 ]; \
+    then  \
+        nvprune --generate-code code=sm_${CUDA_COMPUTE_CAP} /usr/local/cuda/lib64/libcublas_static.a -o /usr/local/cuda/lib64/libcublas_static.a; \
+    elif [ ${CUDA_COMPUTE_CAP} -ge 80 -a ${CUDA_COMPUTE_CAP} -lt 90 ]; \
+    then  \
+        nvprune --generate-code code=sm_80 --generate-code code=sm_${CUDA_COMPUTE_CAP} /usr/local/cuda/lib64/libcublas_static.a -o /usr/local/cuda/lib64/libcublas_static.a; \
+    elif [ ${CUDA_COMPUTE_CAP} -eq 90 ]; \
+    then  \
+        nvprune --generate-code code=sm_90 /usr/local/cuda/lib64/libcublas_static.a -o /usr/local/cuda/lib64/libcublas_static.a; \
+    else  \
+        echo "cuda compute cap ${CUDA_COMPUTE_CAP} is not supported"; exit 1; \
+    fi;
+
+COPY --from=planner /usr/src/recipe.json recipe.json
+
+RUN cargo chef cook --release --features python --features static-linking --no-default-features --recipe-path recipe.json && sccache -s
+
+COPY backends backends
+COPY core core
+COPY router router
+COPY Cargo.toml ./
+COPY Cargo.lock ./
+
+FROM builder AS http-grpc-builder
+
+RUN apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+    unzip \
+    && rm -rf /var/lib/apt/lists/*
+
+RUN PROTOC_ZIP=protoc-21.12-linux-x86_64.zip && \
+    curl -OL https://github.com/protocolbuffers/protobuf/releases/download/v21.12/$PROTOC_ZIP && \
+    unzip -o $PROTOC_ZIP -d /usr/local bin/protoc && \
+    unzip -o $PROTOC_ZIP -d /usr/local 'include/*' && \
+    rm -f $PROTOC_ZIP
+
+COPY proto proto
+
+RUN cargo build --release --bin text-embeddings-router -F python -F static-linking -F http --no-default-features && sccache -s
+
+# Python builder (NVCC included)
+FROM nvidia/cuda:12.4.1-cudnn-devel-ubuntu22.04 AS pytorch-install
+
+ARG PYTORCH_VERSION=2.4.0
+ARG PYTHON_VERSION=3.11
+ARG CUDA_VERSION=12.4
+ARG MAMBA_VERSION=24.3.0-0
+ARG CUDA_CHANNEL=nvidia
+ARG INSTALL_CHANNEL=pytorch
+ARG TARGETPLATFORM
+
+ENV PATH /opt/conda/bin:$PATH
+
+RUN apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+        build-essential \
+        ca-certificates \
+        ccache \
+        curl \
+        git && \
+        rm -rf /var/lib/apt/lists/*
+
+# Install conda
+# translating Docker's TARGETPLATFORM into mamba arches
+RUN case ${TARGETPLATFORM} in \
+         "linux/arm64")  MAMBA_ARCH=aarch64  ;; \
+         *)              MAMBA_ARCH=x86_64   ;; \
+    esac && \
+    curl -fsSL -v -o ~/mambaforge.sh -O  "https://github.com/conda-forge/miniforge/releases/download/${MAMBA_VERSION}/Mambaforge-${MAMBA_VERSION}-Linux-${MAMBA_ARCH}.sh"
+RUN chmod +x ~/mambaforge.sh && \
+    bash ~/mambaforge.sh -b -p /opt/conda && \
+    rm ~/mambaforge.sh
+
+# Install pytorch
+# On arm64 we exit with an error code
+RUN case ${TARGETPLATFORM} in \
+         "linux/arm64")  exit 1 ;; \
+         *)              /opt/conda/bin/conda update -y conda &&  \
+                         /opt/conda/bin/conda install -c "${INSTALL_CHANNEL}" -c "${CUDA_CHANNEL}" -y "python=${PYTHON_VERSION}" "pytorch=$PYTORCH_VERSION" "pytorch-cuda=$(echo $CUDA_VERSION | cut -d'.' -f 1-2)"  ;; \
+    esac && \
+    /opt/conda/bin/conda clean -ya
+
+# CUDA kernels builder image
+FROM pytorch-install AS kernel-builder
+
+ARG MAX_JOBS=8
+ENV TORCH_CUDA_ARCH_LIST="8.0;8.6;9.0+PTX"
+
+RUN apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+        ninja-build cmake \
+        && rm -rf /var/lib/apt/lists/*
+
+# Build Flash Attention CUDA kernels
+FROM kernel-builder AS flash-att-builder
+
+WORKDIR /usr/src
+
+COPY backends/python/server/Makefile-flash-att Makefile
+
+# Build specific version of flash attention
+RUN make build-flash-attention
+
+# Build Flash Attention v2 CUDA kernels
+FROM kernel-builder AS flash-att-v2-builder
+
+WORKDIR /usr/src
+
+COPY backends/python/server/Makefile-flash-att-v2 Makefile
+
+# Build specific version of flash attention v2
+RUN make build-flash-attention-v2-cuda
+
+FROM nvidia/cuda:12.4.1-base-ubuntu22.04 AS base
+
+# Conda env
+ENV PATH=/opt/conda/bin:$PATH \
+    CONDA_PREFIX=/opt/conda
+
+ARG DEFAULT_USE_FLASH_ATTENTION=True
+
+# Text Embeddings Inference base env
+ENV HF_HOME=/data \
+    HUGGINGFACE_HUB_CACHE=/data/hub \
+    HF_HUB_ENABLE_HF_TRANSFER=1 \
+    PORT=80 \
+    USE_FLASH_ATTENTION=$DEFAULT_USE_FLASH_ATTENTION
+
+RUN apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+    ca-certificates \
+    libssl-dev \
+    curl \
+    make \
+    git \
+    && rm -rf /var/lib/apt/lists/*
+
+# Copy conda with PyTorch installed
+COPY --from=pytorch-install /opt/conda /opt/conda
+
+# Copy build artifacts from flash attention builder
+COPY --from=flash-att-builder /usr/src/flash-attention/build/lib.linux-x86_64-cpython-311 /opt/conda/lib/python3.11/site-packages
+COPY --from=flash-att-builder /usr/src/flash-attention/csrc/layer_norm/build/lib.linux-x86_64-cpython-311 /opt/conda/lib/python3.11/site-packages
+COPY --from=flash-att-builder /usr/src/flash-attention/csrc/rotary/build/lib.linux-x86_64-cpython-311 /opt/conda/lib/python3.11/site-packages
+COPY --from=flash-att-builder /usr/src/flash-attention/csrc/fused_dense_lib/build/lib.linux-x86_64-cpython-311 /opt/conda/lib/python3.11/site-packages
+COPY --from=flash-att-builder /usr/src/flash-attention/csrc/fused_softmax/build/lib.linux-x86_64-cpython-311 /opt/conda/lib/python3.11/site-packages
+COPY --from=flash-att-builder /usr/src/flash-attention/csrc/xentropy/build/lib.linux-x86_64-cpython-311 /opt/conda/lib/python3.11/site-packages
+
+# Copy build artifacts from flash attention v2 builder
+COPY --from=flash-att-v2-builder /opt/conda/lib/python3.11/site-packages/flash_attn_2_cuda.cpython-311-x86_64-linux-gnu.so /opt/conda/lib/python3.11/site-packages
+
+# Python stubs
+COPY --from=http-grpc-builder /usr/src/backends/proto /usr/local/backends/proto
+COPY --from=http-grpc-builder /usr/src/backends/python/server /usr/local/backends/python/server
+
+# Install flash-attention dependencies
+RUN pip install einops --no-cache-dir
+
+# Install python-text-embeddings-server
+RUN cd /usr/local/backends/python/server && \
+    make gen-server && \
+    pip install -r requirements.txt && \
+    pip install -e "." --no-cache-dir && \
+    pip install nvidia-nccl-cu12==2.22.3
+
+ENV LD_PRELOAD=/opt/conda/lib/python3.11/site-packages/nvidia/nccl/lib/libnccl.so.2
+# Required to find libpython within the rust binaries
+ENV LD_LIBRARY_PATH="$LD_LIBRARY_PATH:/opt/conda/lib/"
+
+# Deps before the binaries
+# The binaries change on every build given we burn the SHA into them
+# The deps change less often.
+RUN apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+        build-essential \
+        g++ \
+        && rm -rf /var/lib/apt/lists/*
+
+# Install router
+COPY --from=http-grpc-builder /usr/src/target/release/text-embeddings-router /usr/local/bin/text-embeddings-router
+
+ENTRYPOINT ["text-embeddings-router"]
+CMD ["--json-output"]
